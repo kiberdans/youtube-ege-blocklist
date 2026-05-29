@@ -71,7 +71,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("YouTube \u2192 uBlock")
+        self.title("YouTube Block Manager")
         self.geometry("700x500")
 
         self.handles = []
@@ -114,7 +114,12 @@ class App(ctk.CTk):
         ctk.CTkButton(
             toolbar, text="GitHub", command=self._open_github,
             width=80, corner_radius=6
-        ).pack(side="right")
+        ).pack(side="right", padx=(0, 4))
+
+        ctk.CTkButton(
+            toolbar, text="TG", command=self._open_tg,
+            width=50, corner_radius=6
+        ).pack(side="right", padx=(0, 4))
 
         # \u041f\u043e\u0438\u0441\u043a\u043e\u0432\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430 + \u0444\u0438\u043b\u044c\u0442\u0440
         search_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -438,6 +443,9 @@ class App(ctk.CTk):
 
     def _open_github(self):
         webbrowser.open("https://github.com/kiberdans/youtube-ege-blocklist")
+
+    def _open_tg(self):
+        webbrowser.open("https://t.me/+OvwRHCdVBPk2NWRi")
 
     def save_rules(self):
         if not self.handles:
