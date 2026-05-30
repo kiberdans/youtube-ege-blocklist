@@ -35,8 +35,17 @@ SELECTORS = [
     "ytd-channel-renderer",
     ".shortsLockupViewModelHost",
     "yt-lockup-view-model",
+    "ytd-post-renderer",
+    "ytm-shorts-lockup-view-model",
+    "ytm-shorts-lockup-view-model-v2",
+    "grid-shelf-view-model",
 ]
 
+
+_URL_HANDLE_RE = re.compile(
+    r"youtube\.com/(?:@|c/|channel/|user/)?([\w-]+)", re.IGNORECASE
+)
+_SKIP_WORDS = frozenset({"www", "youtube", "com", "c", "channel", "user", "watch", "results", "https"})
 
 def parse_handles(text: str) -> list:
     handles = []
@@ -44,14 +53,22 @@ def parse_handles(text: str) -> list:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+
         at_handles = re.findall(r"@([\w-]+)", line)
         if at_handles:
             handles.extend(f"@{h}" for h in at_handles)
-        else:
-            words = re.findall(r"[\w-]+", line)
-            for w in words:
-                if w:
-                    handles.append(f"@{w}")
+            continue
+
+        m = _URL_HANDLE_RE.search(line)
+        if m:
+            h = m.group(1)
+            if h.lower() not in _SKIP_WORDS:
+                handles.append(f"@{h}")
+                continue
+
+        if re.fullmatch(r"[\w-]+", line):
+            handles.append(f"@{line}")
+
     seen = set()
     unique = []
     for h in handles:
@@ -61,10 +78,48 @@ def parse_handles(text: str) -> list:
     return unique
 
 
-def generate_rules(handles: list) -> str:
-    parts = [f'a[href*="/{h}"]' for h in handles]
-    inner = ", ".join(parts)
-    return "\n".join(f"youtube.com##{s}:has({inner})" for s in SELECTORS)
+def _chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+def generate_rules(handles: list, block_all_shorts: bool = False) -> str:
+    rules = []
+
+    for chunk in _chunks(handles, 15):
+        inner = ", ".join(f'a[href*="/{h}"]' for h in chunk)
+        grouped = f":is({inner})"
+
+        for s in SELECTORS:
+            rules.append(f"youtube.com##{grouped}:upward({s})")
+            rules.append(f"youtube.com##ytd-search {grouped}:upward({s})")
+
+    if block_all_shorts:
+        shorts_rules = [
+            'a[href^="/shorts/"]:upward(grid-shelf-view-model)',
+            'a[href^="/shorts/"]:upward(ytd-rich-item-renderer)',
+            'a[href^="/shorts/"]:upward(ytd-reel-shelf-renderer)',
+            'a[href^="/shorts/"]:upward(ytd-video-renderer)',
+            'yt-section-header-view-model:has-text(/(^| )Shorts( |$)/i):upward(grid-shelf-view-model)',
+            'grid-shelf-view-model:has(ytm-shorts-lockup-view-model)',
+            'grid-shelf-view-model:has(ytm-shorts-lockup-view-model-v2)',
+            'ytm-shorts-lockup-view-model',
+            'ytm-shorts-lockup-view-model-v2',
+            '.shortsLockupViewModelHost',
+            '[overlay-style="SHORTS"]:upward(ytd-video-renderer)',
+            '[overlay-style="SHORTS"]:upward(ytd-rich-item-renderer)',
+            '[overlay-style="SHORTS"]:upward(ytd-compact-video-renderer)',
+            'ytd-rich-shelf-renderer[is-shorts]',
+            'ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts])',
+            'ytd-reel-shelf-renderer',
+            'ytd-guide-entry-renderer:has(a[title="Shorts"])',
+            'ytd-mini-guide-entry-renderer[aria-label="Shorts"]',
+            'yt-tab-shape[tab-title="Shorts"]',
+        ]
+        for s in shorts_rules:
+            rules.append(f"youtube.com##{s}")
+
+    return "\n".join(rules)
+    return "\n".join(rules)
 
 
 class App(ctk.CTk):
@@ -73,6 +128,7 @@ class App(ctk.CTk):
 
         self.title("YouTube Block Manager")
         self.geometry("700x500")
+        self.withdraw()
 
         self.handles = []
         self.vars = {}
@@ -81,33 +137,37 @@ class App(ctk.CTk):
         self._toggled_this_drag: set = set()
         self._filter_mode = "all"  # 'all', 'checked', 'unchecked'
         self._opening_link = False
+        self._block_all_shorts = tk.BooleanVar(value=False)
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", self._on_search_change)
 
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self._build_ui()
         self._setup_global_events()
+        self.refresh()
+        self.update_idletasks()
+        self.deiconify()
         self.after_idle(self.search_entry.focus_set)
-        self.after(10, self.refresh)
 
     # ----------------------------------------------------------------------
-    # \u041f\u043e\u0441\u0442\u0440\u043e\u0435\u043d\u0438\u0435 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430
+    # Построение интерфейса
     # ----------------------------------------------------------------------
     def _build_ui(self):
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
         toolbar.pack(fill="x", padx=8, pady=(8, 4))
 
         ctk.CTkButton(
-            toolbar, text="\u043e\u0431\u043d\u043e\u0432\u0438\u0442\u044c", command=self.refresh, width=100, corner_radius=6
+            toolbar, text="обновить", command=self.refresh, width=100, corner_radius=6
         ).pack(side="left", padx=(0, 4))
 
         ctk.CTkButton(
-            toolbar, text="\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0440\u0430\u0432\u0438\u043b\u0430", command=self.save_rules,
+            toolbar, text="сохранить правила", command=self.save_rules,
             width=140, corner_radius=6
         ).pack(side="left")
 
         ctk.CTkButton(
-            toolbar, text="\u043e\u0442\u043a\u0440\u044b\u0442\u044c links.txt", command=self._open_links_file,
+            toolbar, text="открыть links.txt", command=self._open_links_file,
             width=130, corner_radius=6
         ).pack(side="left", padx=(4, 0))
 
@@ -121,49 +181,60 @@ class App(ctk.CTk):
             width=50, corner_radius=6
         ).pack(side="right", padx=(0, 4))
 
-        # \u041f\u043e\u0438\u0441\u043a\u043e\u0432\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430 + \u0444\u0438\u043b\u044c\u0442\u0440
+        # Поисковая строка + фильтр
         search_frame = ctk.CTkFrame(self, fg_color="transparent")
         search_frame.pack(fill="x", padx=8, pady=(4, 2))
 
-        ctk.CTkLabel(search_frame, text="\u043f\u043e\u0438\u0441\u043a:", anchor="w").pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(search_frame, text="поиск:", anchor="w").pack(side="left", padx=(0, 4))
         self.search_entry = ctk.CTkEntry(
             search_frame, textvariable=self.search_var, corner_radius=6
         )
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        # \u0424\u0438\u043b\u044c\u0442\u0440-\u043a\u043d\u043e\u043f\u043a\u0438
+        # Фильтр-кнопки
         self.filter_all_btn = ctk.CTkButton(
-            search_frame, text="\u0432\u0441\u0435", width=50, corner_radius=6,
+            search_frame, text="все", width=50, corner_radius=6,
             command=lambda: self._set_filter("all")
         )
         self.filter_all_btn.pack(side="left", padx=(0, 4))
 
         self.filter_checked_btn = ctk.CTkButton(
-            search_frame, text="\u2713 \u0432\u044b\u0431\u0440.", width=60, corner_radius=6,
+            search_frame, text="✓ выбр.", width=60, corner_radius=6,
             command=lambda: self._set_filter("checked")
         )
         self.filter_checked_btn.pack(side="left", padx=(0, 4))
 
         self.filter_unchecked_btn = ctk.CTkButton(
-            search_frame, text="\u2717 \u043d\u0435 \u0432\u044b\u0431\u0440.", width=70, corner_radius=6,
+            search_frame, text="✗ не выбр.", width=70, corner_radius=6,
             command=lambda: self._set_filter("unchecked")
         )
         self.filter_unchecked_btn.pack(side="left")
 
-        # \u041a\u043d\u043e\u043f\u043a\u0430 "\u0432\u044b\u0431\u0440\u0430\u0442\u044c \u0432\u0441\u0451 / \u0441\u043d\u044f\u0442\u044c \u0432\u0441\u0451"
-        self.toggle_btn = ctk.CTkButton(
-            self, text="\u0432\u044b\u0431\u0440\u0430\u0442\u044c \u0432\u0441\u0451", command=self.toggle_all, width=130, corner_radius=6
-        )
-        self.toggle_btn.pack(anchor="w", padx=8, pady=(4, 2))
+        # Кнопка "выбрать всё / снять всё" и блокировка шортсов
+        control_frame = ctk.CTkFrame(self, fg_color="transparent")
+        control_frame.pack(fill="x", padx=8, pady=(4, 2))
 
-        # \u0421\u043a\u0440\u043e\u043b\u043b\u0438\u0440\u0443\u0435\u043c\u0430\u044f \u043e\u0431\u043b\u0430\u0441\u0442\u044c \u0441\u043e \u0441\u043f\u0438\u0441\u043a\u043e\u043c
+        self.toggle_btn = ctk.CTkButton(
+            control_frame, text="выбрать всё", command=self.toggle_all, width=130, corner_radius=6
+        )
+        self.toggle_btn.pack(side="left")
+
+        self.block_shorts_cb = ctk.CTkCheckBox(
+            control_frame, text="блокировать все Shorts (целиком блок)",
+            variable=self._block_all_shorts,
+            command=self._on_block_shorts_toggle,
+            corner_radius=6
+        )
+        self.block_shorts_cb.pack(side="left", padx=(12, 0))
+
+        # Скроллируемая область со списком
         self.scrollable = ctk.CTkScrollableFrame(self, corner_radius=6)
         self.scrollable.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
         self._setup_mousewheel_binding()
 
-        # \u0421\u0442\u0440\u043e\u043a\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430
-        self.status_var = tk.StringVar(value="\u0413\u043e\u0442\u043e\u0432\u043e")
+        # Строка статуса
+        self.status_var = tk.StringVar(value="Готово")
         ctk.CTkLabel(
             self, textvariable=self.status_var, anchor="w"
         ).pack(fill="x", padx=8, pady=(0, 6))
@@ -174,6 +245,7 @@ class App(ctk.CTk):
         self.filter_checked_btn.configure(fg_color="#3a7ebf" if mode == "checked" else "#2b2b2b")
         self.filter_unchecked_btn.configure(fg_color="#3a7ebf" if mode == "unchecked" else "#2b2b2b")
         self._toggled_this_drag.clear()
+        self._save_state()
         self.render_list()
         self.scrollable._parent_canvas.yview_moveto(0)
 
@@ -189,18 +261,18 @@ class App(ctk.CTk):
         self.bind("<B1-Motion>", self._on_drag_motion)
         self.bind("<ButtonRelease-1>", self._on_drag_release)
 
-        # \u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435 \u043c\u0435\u043d\u044e
+        # Контекстное меню
         self.context_menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="#d4d4d4")
-        self.context_menu.add_command(label="\u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c handle", command=self._copy_handle)
-        self.context_menu.add_command(label="\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043a\u0430\u043d\u0430\u043b \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435", command=self._open_channel)
+        self.context_menu.add_command(label="Копировать handle", command=self._copy_handle)
+        self.context_menu.add_command(label="Открыть канал в браузере", command=self._open_channel)
         self.context_menu.add_separator()
-        self.context_menu.add_command(label="\u0412\u044b\u0431\u0440\u0430\u0442\u044c \u044d\u0442\u043e\u0442 \u043a\u0430\u043d\u0430\u043b", command=lambda: self._set_checked(True))
-        self.context_menu.add_command(label="\u0421\u043d\u044f\u0442\u044c \u0432\u044b\u0431\u043e\u0440", command=lambda: self._set_checked(False))
+        self.context_menu.add_command(label="Выбрать этот канал", command=lambda: self._set_checked(True))
+        self.context_menu.add_command(label="Снять выбор", command=lambda: self._set_checked(False))
 
         self._context_handle = None
 
     # ----------------------------------------------------------------------
-    # \u0421\u043e\u0431\u044b\u0442\u0438\u044f \u043c\u044b\u0448\u0438 \u0438 \u043f\u0440\u043e\u043a\u0440\u0443\u0442\u043a\u0430
+    # События мыши и прокрутка
     # ----------------------------------------------------------------------
     def _on_mousewheel(self, event):
         if sys.platform.startswith('linux'):
@@ -228,7 +300,7 @@ class App(ctk.CTk):
         if not self._drag_active:
             return
 
-        # \u0410\u0432\u0442\u043e\u0441\u043a\u0440\u043e\u043b\u043b \u043f\u0440\u0438 \u043f\u0440\u0438\u0431\u043b\u0438\u0436\u0435\u043d\u0438\u0438 \u043a \u043a\u0440\u0430\u044f\u043c
+        # Автоскролл при приближении к краям
         canvas = self.scrollable._parent_canvas
         y = event.y_root - self.scrollable.winfo_rooty()
         height = self.scrollable.winfo_height()
@@ -261,7 +333,7 @@ class App(ctk.CTk):
             self._update_toggle_button()
 
     # ----------------------------------------------------------------------
-    # \u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435 \u043c\u0435\u043d\u044e
+    # Контекстное меню
     # ----------------------------------------------------------------------
     def _show_context_menu(self, event, handle):
         self._context_handle = handle
@@ -271,7 +343,7 @@ class App(ctk.CTk):
         if self._context_handle:
             self.clipboard_clear()
             self.clipboard_append(self._context_handle)
-            self.status_var.set(f"\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d {self._context_handle}")
+            self.status_var.set(f"Скопирован {self._context_handle}")
 
     def _open_channel(self):
         if self._context_handle:
@@ -287,30 +359,37 @@ class App(ctk.CTk):
             self.render_list()
 
     # ----------------------------------------------------------------------
-    # \u041e\u0441\u043d\u043e\u0432\u043d\u0430\u044f \u043b\u043e\u0433\u0438\u043a\u0430
+    # Основная логика
     # ----------------------------------------------------------------------
     def _load_state(self) -> dict:
         if not os.path.exists(STATE_FILE):
             return {}
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                return data
         except Exception:
             return {}
 
     def _save_state(self):
         try:
+            data = {
+                "handles": {h: v.get() for h, v in self.vars.items()},
+                "ui": {
+                    "block_all_shorts": self._block_all_shorts.get(),
+                    "filter_mode": self._filter_mode,
+                },
+            }
             with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump({h: v.get() for h, v in self.vars.items()},
-                          f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"\u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u044f: {e}")
+            print(f"Ошибка сохранения состояния: {e}")
 
     def refresh(self):
         if not os.path.exists(LINKS_FILE):
             self.handles = []
             self.vars = {}
-            self.status_var.set("\u0424\u0430\u0439\u043b links.txt \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d")
+            self.status_var.set("Файл links.txt не найден")
             self.render_list()
             return
 
@@ -321,6 +400,13 @@ class App(ctk.CTk):
         new_handles.sort(key=lambda h: h.lower())
         saved_state = self._load_state()
 
+        if isinstance(saved_state, dict) and "handles" in saved_state:
+            handles_state = saved_state["handles"]
+            ui_state = saved_state.get("ui", {})
+        else:
+            handles_state = saved_state if isinstance(saved_state, dict) else {}
+            ui_state = {}
+
         old_vars = self.vars
         self.handles = new_handles
         self.vars = {}
@@ -328,18 +414,27 @@ class App(ctk.CTk):
         for h in self.handles:
             if h in old_vars:
                 self.vars[h] = old_vars[h]
-            elif h in saved_state:
-                self.vars[h] = tk.BooleanVar(value=saved_state[h])
+            elif h in handles_state:
+                self.vars[h] = tk.BooleanVar(value=handles_state[h])
             else:
                 self.vars[h] = tk.BooleanVar(value=True)
+
+        if "block_all_shorts" in ui_state:
+            self._block_all_shorts.set(ui_state["block_all_shorts"])
+        if "filter_mode" in ui_state:
+            self._set_filter(ui_state["filter_mode"])
 
         self._update_toggle_button()
         self.render_list()
         self._save_state()
 
     def render_list(self):
+        self.scrollable._parent_canvas.itemconfigure("all", state="hidden")
+
         current_checks = {h: v.get() for h, v in self.vars.items()}
         for w in self.scrollable.winfo_children():
+            if isinstance(w, ctk.CTkCheckBox):
+                w.configure(variable=None)
             w.destroy()
 
         self.scrollable._parent_canvas.configure(
@@ -357,10 +452,11 @@ class App(ctk.CTk):
 
         if not filtered:
             ctk.CTkLabel(
-                self.scrollable, text="\u0442\u0443\u0442 \u043f\u0443\u0441\u0442\u043e",
+                self.scrollable, text="тут пусто",
                 anchor="center", font=("TkDefaultFont", 14, "bold")
             ).pack(expand=True, fill="both")
             self._update_status(filtered_count=0)
+            self.scrollable._parent_canvas.itemconfigure("all", state="normal")
             return
 
         for h in filtered:
@@ -379,6 +475,7 @@ class App(ctk.CTk):
             cb.bind("<Button-3>", lambda e, h=h: self._show_context_menu(e, h))
             cb.bind("<Double-Button-1>", lambda e, cb=cb, h=h: self._highlight_and_open(cb, h))
 
+        self.scrollable._parent_canvas.itemconfigure("all", state="normal")
         self._update_status(filtered_count=len(filtered))
 
     def _on_toggle(self, handle: str):
@@ -394,16 +491,16 @@ class App(ctk.CTk):
         query = self.search_var.get().strip()
         if filtered_count is not None and (query or self._filter_mode != "all"):
             self.status_var.set(
-                f"\u041a\u0430\u043d\u0430\u043b\u043e\u0432: {total}, \u0432\u044b\u0431\u0440\u0430\u043d\u043e: {checked}, \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u043e: {filtered_count}"
+                f"Каналов: {total}, выбрано: {checked}, показано: {filtered_count}"
             )
         else:
-            self.status_var.set(f"\u041a\u0430\u043d\u0430\u043b\u043e\u0432: {total}, \u0432\u044b\u0431\u0440\u0430\u043d\u043e: {checked}")
+            self.status_var.set(f"Каналов: {total}, выбрано: {checked}")
 
     def _update_toggle_button(self):
         if not self.vars:
             return
         all_checked = all(v.get() for v in self.vars.values())
-        self.toggle_btn.configure(text="\u0441\u043d\u044f\u0442\u044c \u0432\u0441\u0451" if all_checked else "\u0432\u044b\u0431\u0440\u0430\u0442\u044c \u0432\u0441\u0451")
+        self.toggle_btn.configure(text="снять всё" if all_checked else "выбрать всё")
 
     def toggle_all(self):
         if not self.vars:
@@ -421,11 +518,16 @@ class App(ctk.CTk):
             return
         self._opening_link = True
         original_fg = checkbox.cget("fg_color")
+        if original_fg is None:
+            original_fg = checkbox.cget("border_color")
         checkbox.configure(fg_color="#3a7ebf")
 
         def open_and_restore():
             webbrowser.open(f"https://www.youtube.com/@{handle.lstrip('@')}")
-            checkbox.configure(fg_color=original_fg)
+            try:
+                checkbox.configure(fg_color=original_fg)
+            except Exception:
+                checkbox.configure(fg_color="default")
             self._opening_link = False
 
         self.after(200, open_and_restore)
@@ -433,7 +535,7 @@ class App(ctk.CTk):
     def _open_links_file(self):
         if not os.path.exists(LINKS_FILE):
             with open(LINKS_FILE, "w", encoding="utf-8") as f:
-                f.write("# \u0421\u043f\u0438\u0441\u043e\u043a \u043a\u0430\u043d\u0430\u043b\u043e\u0432 (\u043f\u043e \u043e\u0434\u043d\u043e\u043c\u0443 \u0438\u043b\u0438 \u0441 @)\n")
+                f.write("# Список каналов (по одному или с @)\n")
         if sys.platform == "win32":
             os.startfile(LINKS_FILE)
         elif sys.platform == "darwin":
@@ -449,20 +551,27 @@ class App(ctk.CTk):
 
     def save_rules(self):
         if not self.handles:
-            self.status_var.set("\u041d\u0435\u0442 \u043a\u0430\u043d\u0430\u043b\u043e\u0432 \u0434\u043b\u044f \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438")
+            self.status_var.set("Нет каналов для генерации")
             return
 
         checked_handles = [h for h, v in self.vars.items() if v.get()]
         if not checked_handles:
-            self.status_var.set("\u041d\u0435\u0442 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u043a\u0430\u043d\u0430\u043b\u043e\u0432")
+            self.status_var.set("Нет выбранных каналов")
             return
 
-        rules = generate_rules(checked_handles)
+        rules = generate_rules(checked_handles, self._block_all_shorts.get())
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write(rules + "\n")
 
-        self.status_var.set(f"\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e {len(checked_handles)} \u043a\u0430\u043d\u0430\u043b\u043e\u0432 \u2192 output.txt")
+        self.status_var.set(f"Сохранено {len(checked_handles)} каналов → output.txt")
 
+    def _on_block_shorts_toggle(self):
+        self._save_state()
+        self.save_rules()
+
+    def _on_closing(self):
+        self._save_state()
+        self.destroy()
 
 if __name__ == "__main__":
     ctk.set_appearance_mode("dark")
