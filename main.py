@@ -1,4 +1,5 @@
 import sys
+import urllib.parse
 
 # Заглушка для darkdetect, чтобы не крашить сессию
 class _NoopDarkdetect:
@@ -43,7 +44,7 @@ SELECTORS = [
 
 
 _URL_HANDLE_RE = re.compile(
-    r"youtube\.com/(?:@|c/|channel/|user/)?([\w-]+)", re.IGNORECASE
+    r"youtube\.com/(?:@|c/|channel/|user/)?([\w\u0400-\u04FF-]+)", re.IGNORECASE
 )
 _SKIP_WORDS = frozenset({"www", "youtube", "com", "c", "channel", "user", "watch", "results", "https"})
 
@@ -54,19 +55,19 @@ def parse_handles(text: str) -> list:
         if not line or line.startswith("#"):
             continue
 
-        at_handles = re.findall(r"@([\w-]+)", line)
+        at_handles = re.findall(r"@([\w\u0400-\u04FF-]+)", line)
         if at_handles:
-            handles.extend(f"@{h}" for h in at_handles)
+            handles.extend(f"@{urllib.parse.unquote(h)}" for h in at_handles)
             continue
 
         m = _URL_HANDLE_RE.search(line)
         if m:
             h = m.group(1)
             if h.lower() not in _SKIP_WORDS:
-                handles.append(f"@{h}")
+                handles.append(f"@{urllib.parse.unquote(h)}")
                 continue
 
-        if re.fullmatch(r"[\w-]+", line):
+        if re.fullmatch(r"[\w\u0400-\u04FF-]+", line):
             handles.append(f"@{line}")
 
     seen = set()
@@ -85,7 +86,13 @@ def _chunks(lst, n):
 def generate_rules(handles: list, block_all_shorts: bool = False) -> str:
     rules = []
 
-    for chunk in _chunks(handles, 15):
+    encoded_handles = []
+    for h in handles:
+        raw = h.lstrip("@")
+        encoded = urllib.parse.quote(raw, safe="")
+        encoded_handles.append(f"@{encoded}")
+
+    for chunk in _chunks(encoded_handles, 15):
         inner = ", ".join(f'a[href*="/{h}"]' for h in chunk)
         grouped = f":is({inner})"
 
